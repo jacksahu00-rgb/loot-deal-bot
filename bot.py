@@ -12,16 +12,19 @@ AMAZON_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "lootdeals-21")
 FLIPKART_AFFID = os.getenv("FLIPKART_AFFILIATE_ID", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
-# Brands you explicitly want
 ALLOWED_BRANDS = ["jbl", "oneplus", "bose", "samsung", "oppo", "realme"]
 
-# Competitor / budget brands to block (prevents "Noise with Bose audio", "boAt", etc.)
 BLOCKED_BRANDS = [
     "noise", "boat", "boult", "ptron", "mivi", "fire-boltt",
-    "zebronics", "hammer", "portronics", "ambrane", "truke", "wings"
+    "zebronics", "hammer", "portronics", "ambrane", "truke", "wings", "qqlike"
 ]
 
-# Blacklist to ignore junk accessories
+# Clone sellers exploit these keywords to mimic genuine brands
+CLONE_KEYWORDS = [
+    "compatible with", "compatible for", "suitable for", "replacement for",
+    "designed for", "supports", "for oneplus", "for samsung", "for jbl", "for bose"
+]
+
 JUNK_KEYWORDS = [
     "back cover", "case", "strap", "tempered glass", "screen protector",
     "pouch", "skin", "cleaning kit", "cable protector", "stand holder", "silicone"
@@ -30,7 +33,7 @@ JUNK_KEYWORDS = [
 BRAND_MIN_DISCOUNT = 15
 MAX_DEALS_PER_RUN = 3
 
-# Targeted feeds that return your specific brands
+# 3 balanced feeds (Page 1 + Page 2) ensures fresh deals without quota burn
 FEEDS = [
     {
         "store": "Amazon",
@@ -38,11 +41,11 @@ FEEDS = [
     },
     {
         "store": "Amazon",
-        "url": "https://www.amazon.in/s?i=electronics&rh=n%3A1388921031%2Cp_89%3ABose%7Cp_89%3AJBL%7Cp_89%3AOnePlus%7Cp_89%3AOppo%7Cp_89%3ARealme%7Cp_89%3ASamsung&s=popularity-rank"
+        # Page 2 keeps pipeline full when page 1 items are already posted
+        "url": "https://www.amazon.in/s?i=electronics&rh=p_89%3ABose%7Cp_89%3AJBL%7Cp_89%3AOnePlus%7Cp_89%3AOppo%7Cp_89%3ARealme%7Cp_89%3ASamsung&page=2&s=popularity-rank"
     },
     {
         "store": "Flipkart",
-        # Explicit brand search ensures page 1 is packed with your target brands
         "url": "https://www.flipkart.com/search?q=oneplus+realme+jbl+buds&sort=popularity"
     }
 ]
@@ -66,7 +69,7 @@ def fetch_page(url, retries=2):
             print(f"[WARNING] Fetch error on attempt {attempt}/{retries}: {err}")
         time.sleep(3)
 
-    print(f"[ERROR] Failed to fetch feed after {retries} attempts: {url[:50]}...")
+    print(f"[ERROR] Failed to fetch feed after {retries} attempts.")
     return None
 
 
@@ -80,16 +83,23 @@ def clean_price(text):
         return None
 
 
-def is_valid_brand_product(title):
+def is_genuine_brand_product(title):
     title_lower = title.lower()
 
-    # Reject if it belongs to a competitor budget brand (e.g. Noise with Bose sound)
+    # 1. Reject compatibility/clone phrasing
+    if any(clone_phrase in title_lower for clone_phrase in CLONE_KEYWORDS):
+        return False
+
+    # 2. Reject budget/competitor brands
     for blocked in BLOCKED_BRANDS:
         if re.search(r"\b" + re.escape(blocked) + r"\b", title_lower):
             return False
 
-    # Verify title contains at least one allowed brand
-    return any(re.search(r"\b" + re.escape(brand) + r"\b", title_lower) for brand in ALLOWED_BRANDS)
+    # 3. Genuine products: The brand name MUST appear in the first 4 words
+    tokens = re.findall(r"\b[a-z0-9]+\b", title_lower)
+    first_four = tokens[:4] if len(tokens) >= 4 else tokens
+
+    return any(brand in first_four for brand in ALLOWED_BRANDS)
 
 
 def is_junk_item(title):
@@ -110,8 +120,8 @@ def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, 
     if is_junk_item(title):
         return None
 
-    # Strict brand verification
-    if not is_valid_brand_product(title):
+    # Strict authenticity & brand verification
+    if not is_genuine_brand_product(title):
         return None
 
     if mrp_price and mrp_price > deal_price:
@@ -303,7 +313,7 @@ def main():
             continue
 
         deals = parse_amazon(html) if feed["store"] == "Amazon" else parse_flipkart(html)
-        print(f"[INFO] Found {len(deals)} valid brand items from {feed['store']}.")
+        print(f"[INFO] Found {len(deals)} genuine brand items from {feed['store']}.")
 
         for d in deals:
             if d["id"] not in posted_ids and d["signature"] not in current_run_signatures:
@@ -332,9 +342,9 @@ def main():
         trimmed = list(posted_ids)[-500:]
         with open(history_file, "w") as f:
             json.dump(trimmed, f, indent=2)
-        print(f"[INFO] Posted {posted_count} unique brand deals. History updated.")
+        print(f"[INFO] Posted {posted_count} verified deals. History updated.")
     else:
-        print("[INFO] No new unique brand deals met criteria this run.")
+        print("[INFO] No new verified brand deals met criteria this run.")
 
 
 if __name__ == "__main__":
