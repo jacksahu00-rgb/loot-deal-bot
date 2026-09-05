@@ -29,33 +29,33 @@ JUNK_KEYWORDS = [
     "pouch", "skin", "cleaning kit", "cable protector", "stand holder", "silicone"
 ]
 
-ALLOWED_PREFIXES = ["all-new", "new", "newly", "the", "latest"]
+ALLOWED_PREFIXES = ["all-new", "new", "newly", "the", "latest", "truly", "wireless", "original", "genuine"]
 
 INSTANT_LOOT_DISCOUNT = 50
 MAX_DEALS_PER_RUN = 3
 
-# 3 targeted feeds = 4,320 requests/month (stays under ScraperAPI's 5,000 credit limit)
-FEEDS = [
-    {
-        # Amazon: Covers all 6 brands using brand facet filters
-        "store": "Amazon",
-        "url": "https://www.amazon.in/s?k=earbuds&rh=p_89%3ABose%7Cp_89%3AJBL%7Cp_89%3AOnePlus%7Cp_89%3AOppo%7Cp_89%3ARealme%7Cp_89%3ASamsung&s=popularity-rank"
-    },
-    {
-        # Flipkart: OnePlus, realme, and JBL audio
-        "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=oneplus+realme+jbl+earbuds&sort=popularity"
-    },
-    {
-        # Flipkart: Samsung, OPPO, and Bose audio
-        "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=samsung+oppo+bose+earbuds&sort=popularity"
-    }
+# High-yield dedicated feeds covering all 6 brands cleanly
+ALL_FEEDS = [
+    {"store": "Amazon", "url": "https://www.amazon.in/s?k=oneplus+buds&s=popularity-rank"},
+    {"store": "Amazon", "url": "https://www.amazon.in/s?k=jbl+earbuds&s=popularity-rank"},
+    {"store": "Amazon", "url": "https://www.amazon.in/s?k=samsung+galaxy+buds&s=popularity-rank"},
+    {"store": "Flipkart", "url": "https://www.flipkart.com/search?q=oneplus+buds&sort=popularity"},
+    {"store": "Flipkart", "url": "https://www.flipkart.com/search?q=realme+buds&sort=popularity"},
+    {"store": "Flipkart", "url": "https://www.flipkart.com/search?q=oppo+bose+buds&sort=popularity"},
 ]
 
 
+def get_active_feeds():
+    # Rotates 3 feeds every 30-minute interval = 4,320 requests/mo (safe within 5,000 credit limit)
+    run_slot = int(time.time() // 1800)
+    total = len(ALL_FEEDS)
+    idx1 = run_slot % total
+    idx2 = (run_slot + 1) % total
+    idx3 = (run_slot + 2) % total
+    return [ALL_FEEDS[idx1], ALL_FEEDS[idx2], ALL_FEEDS[idx3]]
+
+
 def fetch_page(url, retries=2):
-    # Parameters let ScraperAPI handle pristine header rotation dynamically
     params = {
         "api_key": SCRAPER_API_KEY,
         "url": url,
@@ -66,7 +66,6 @@ def fetch_page(url, retries=2):
         try:
             response = requests.get("http://api.scraperapi.com", params=params, timeout=60)
             if response.status_code == 200 and len(response.text) > 2000:
-                # Catch silent Amazon CAPTCHA splash pages and retry
                 if "api-services-support@amazon.com" in response.text or "Robot Check" in response.text:
                     print(f"[WARNING] Amazon CAPTCHA detected (attempt {attempt}/{retries}). Retrying...")
                     time.sleep(4)
@@ -110,7 +109,6 @@ def is_genuine_brand_product(title):
     if not tokens:
         return False
 
-    # Leading word must be one of your verified brands
     return tokens[0] in ALLOWED_BRANDS
 
 
@@ -157,7 +155,7 @@ def extract_deal_info(title, deal_price, mrp_price, image_url, deal_url, unique_
 
 def parse_amazon(html):
     soup = BeautifulSoup(html, "html.parser")
-    items = soup.select('div[data-asin]:not([data-asin=""])')
+    items = soup.select('div[data-component-type="s-search-result"], div[data-asin]:not([data-asin=""])')
     results = []
 
     for item in items:
@@ -319,10 +317,11 @@ def main():
         except Exception:
             history = {}
 
+    active_feeds = get_active_feeds()
     discovered_items = []
 
-    for feed in FEEDS:
-        print(f"[INFO] Scanning {feed['store']} feed...")
+    for feed in active_feeds:
+        print(f"[INFO] Scanning {feed['store']} feed: {feed['url'][:45]}...")
         html = fetch_page(feed["url"])
         if not html:
             continue
@@ -345,7 +344,6 @@ def main():
         if sig in current_run_signatures:
             continue
 
-        # Case 1: Extreme Price Glitch
         is_glitch = discount >= 65 or (mrp and mrp >= 3000 and current_price <= 799)
         if is_glitch:
             item["is_glitch"] = True
@@ -354,7 +352,6 @@ def main():
             history[uid] = {"base_price": current_price}
             continue
 
-        # Case 2: Known product dropping below recorded baseline
         if uid in history and history[uid].get("base_price"):
             base_price = history[uid]["base_price"]
             if current_price < base_price and (base_price - current_price >= 200 or (base_price - current_price) / base_price >= 0.05):
@@ -368,7 +365,6 @@ def main():
             elif current_price < base_price:
                 history[uid]["base_price"] = current_price
 
-        # Case 3: First-time seen product
         if uid not in history:
             if discount >= INSTANT_LOOT_DISCOUNT:
                 item["is_price_drop"] = False
@@ -391,7 +387,6 @@ def main():
             posted_count += 1
             time.sleep(3)
 
-    # Trim tracking history to last 500 items to keep repository commits small
     if len(history) > 500:
         keys_to_keep = list(history.keys())[-500:]
         history = {k: history[k] for k in keys_to_keep}
