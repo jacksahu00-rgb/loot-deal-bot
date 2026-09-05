@@ -7,165 +7,193 @@ from bs4 import BeautifulSoup
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-AFFILIATE_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "deal-21")
+AFFILIATE_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "lootdeals-21")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
+# Amazon India search feeds filtered for 50%+ discounts
+DEAL_FEEDS = [
+    # Electronics 50%+ off
+    "https://www.amazon.in/s?i=electronics&rh=p_8%3A50-&s=popularity-rank",
+    # Computers & Accessories 50%+ off
+    "https://www.amazon.in/s?i=computers&rh=p_8%3A50-&s=popularity-rank",
+]
 
-def fetch_amazon_page(asin):
-    if not SCRAPER_API_KEY:
-        print("[ERROR] SCRAPER_API_KEY is missing!")
-        return None
+# Minimum discount percentage to qualify as a "Loot" deal
+MIN_DISCOUNT_PERCENT = 40
+# Maximum deals to broadcast per run to avoid spamming the channel
+MAX_DEALS_PER_RUN = 3
 
-    target_url = f"https://www.amazon.in/dp/{asin}"
-    api_url = (
-        f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}"
-        f"&url={target_url}&country_code=in"
-    )
-    print(f"[INFO] Fetching {asin} through ScraperAPI proxy...")
+
+def fetch_page(url):
+    api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&country_code=in"
+    print(f"[INFO] Fetching deal category feed...")
     try:
-        response = requests.get(api_url, timeout=60)
+        response = requests.get(api_url, timeout=45)
         if response.status_code == 200:
             return response.text
-        print(f"[ERROR] Proxy returned status {response.status_code}")
+        print(f"[ERROR] Proxy error: HTTP {response.status_code}")
     except Exception as err:
-        print(f"[ERROR] Request error: {err}")
+        print(f"[ERROR] Request failed: {err}")
     return None
 
 
 def clean_price(text):
     if not text:
         return None
-    cleaned = re.sub(r"[^\d.]", "", text.replace(",", ""))
+    digits = re.sub(r"[^\d.]", "", text.replace(",", ""))
     try:
-        return float(cleaned.split(".")[0])
+        return float(digits.split(".")[0])
     except ValueError:
         return None
 
 
-def parse_product(html, asin):
+def parse_deals_from_feed(html):
     soup = BeautifulSoup(html, "html.parser")
+    items = soup.select('div[data-component-type="s-search-result"]')
+    discovered = []
 
-    # 1. Product Title
-    title_elem = soup.select_one("#productTitle")
-    title = title_elem.get_text(strip=True) if title_elem else f"Product ({asin})"
-    if len(title) > 85:
-        title = title[:82] + "..."
+    for item in items:
+        asin = item.get("data-asin")
+        if not asin:
+            continue
 
-    # 2. Deal Price
-    deal_price = None
-    price_selectors = [
-        "span.priceToPay span.a-price-whole",
-        "#corePriceDisplay_desktop_feature_div span.a-price-whole",
-        "#apex_desktop span.a-price-whole",
-        "#priceblock_dealprice",
-        "#priceblock_ourprice",
-        "span.a-price span.a-offscreen",
-    ]
-    for sel in price_selectors:
-        elem = soup.select_one(sel)
-        if elem:
-            val = clean_price(elem.get_text(strip=True))
-            if val:
-                deal_price = val
-                break
+        # Title
+        title_el = item.select_one("h2 span") or item.select_one("h2 a span")
+        if not title_el:
+            continue
+        title = title_el.get_text(strip=True)
+        if len(title) > 85:
+            title = title[:82] + "..."
 
-    # 3. Regular / MRP Price
-    regular_price = None
-    mrp_selectors = [
-        "span.a-price.a-text-price[data-a-strike='true'] span.a-offscreen",
-        "span.basisPrice span.a-price-whole",
-        "#corePrice_desktop span.a-text-strike",
-        "span.priceBlockStrikePriceString",
-    ]
-    for sel in mrp_selectors:
-        elem = soup.select_one(sel)
-        if elem:
-            val = clean_price(elem.get_text(strip=True))
-            if val and (deal_price is None or val > deal_price):
-                regular_price = val
-                break
+        # Deal Price
+        price_el = item.select_one("span.a-price-whole")
+        if not price_el:
+            continue
+        deal_price = clean_price(price_el.get_text(strip=True))
+        if not deal_price or deal_price < 99:
+            continue
 
-    # 4. Product Image
-    image_url = None
-    img_elem = soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
-    if img_elem:
-        image_url = img_elem.get("data-old-hires") or img_elem.get("src")
+        # Regular / MRP Price
+        mrp_price = None
+        mrp_el = item.select_one("span.a-price.a-text-price span.a-offscreen") or item.select_one("span.a-text-strike")
+        if mrp_el:
+            mrp_price = clean_price(mrp_el.get_text(strip=True))
 
-    return title, deal_price, regular_price, image_url
+        # Check discount %
+        if mrp_price and mrp_price > deal_price:
+            discount = int(((mrp_price - deal_price) / mrp_price) * 100)
+        else:
+            discount = 0
+
+        # High-res Image
+        img_el = item.select_one("img.s-image")
+        image_url = img_el.get("src") if img_el else None
+
+        if discount >= MIN_DISCOUNT_PERCENT:
+            discovered.append({
+                "asin": asin,
+                "title": title,
+                "deal_price": deal_price,
+                "mrp_price": mrp_price,
+                "discount": discount,
+                "image_url": image_url,
+            })
+
+    return discovered
 
 
-def send_telegram(title, deal_price, regular_price, asin, image_url):
+def send_telegram(deal):
+    asin = deal["asin"]
     deal_url = f"https://www.amazon.in/dp/{asin}?th=1&tag={AFFILIATE_TAG}"
 
-    caption = f"<b>{title} @ ₹{int(deal_price):,}</b>\n\n"
-    caption += f"🔗 {deal_url}\n\n"
-    if regular_price:
-        caption += f"❌ Regular price @ ₹{int(regular_price):,}"
+    caption = f"🔥 <b>{deal['discount']}% OFF | {deal['title']}</b>\n\n"
+    caption += f"💰 <b>Deal Price:</b> ₹{int(deal['deal_price']):,}\n"
+    if deal["mrp_price"]:
+        caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n\n"
+    else:
+        caption += "\n"
+    caption += f"🛒 <b>Buy Now:</b>\n{deal_url}"
 
-    if image_url:
+    # Try sending with image
+    if deal["image_url"]:
         try:
             res = requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                data={"chat_id": CHAT_ID, "photo": image_url, "caption": caption, "parse_mode": "HTML"},
+                data={"chat_id": CHAT_ID, "photo": deal["image_url"], "caption": caption, "parse_mode": "HTML"},
                 timeout=25,
             )
-            if res.status_code == 200:
-                print(f"[SUCCESS] Telegram photo alert sent for {asin}!")
-                return
+            if res.json().get("ok"):
+                print(f"[SUCCESS] Posted loot deal: {asin} ({deal['discount']}% off)")
+                return True
         except Exception as e:
-            print(f"[WARNING] Image upload failed: {e}")
+            print(f"[WARNING] Image post failed: {e}")
 
     # Fallback to text message
-    requests.post(
+    res = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         data={"chat_id": CHAT_ID, "text": caption, "parse_mode": "HTML"},
         timeout=25,
     )
-    print(f"[SUCCESS] Telegram text alert sent for {asin}!")
+    if res.json().get("ok"):
+        print(f"[SUCCESS] Posted text deal: {asin}")
+        return True
+
+    return False
 
 
 def main():
-    if not os.path.exists("products.json"):
-        print("[ERROR] products.json not found!")
-        return
+    history_file = "posted_deals.json"
+    posted_asins = set()
 
-    with open("products.json", "r") as f:
-        products = json.load(f)
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, "r") as f:
+                history_data = json.load(f)
+                posted_asins = set(history_data)
+        except Exception:
+            posted_asins = set()
 
-    updated = False
+    deals_to_post = []
 
-    for item in products:
-        asin = item.get("asin")
-        threshold = item.get("threshold_price", float("inf"))
-        last_price = item.get("last_price")
-
-        html = fetch_amazon_page(asin)
+    for feed_url in DEAL_FEEDS:
+        html = fetch_page(feed_url)
         if not html:
             continue
 
-        title, deal_price, regular_price, image_url = parse_product(html, asin)
+        deals = parse_deals_from_feed(html)
+        print(f"[INFO] Found {len(deals)} items with >= {MIN_DISCOUNT_PERCENT}% discount.")
 
-        if not deal_price:
-            print(f"[WARNING] Could not parse price for {asin}")
-            continue
-
-        print(f"[INFO] {asin} | Current: ₹{deal_price} | MRP: ₹{regular_price} | Threshold: ₹{threshold}")
-
-        if deal_price <= threshold and (last_price is None or deal_price < last_price):
-            print(f"[ALERT] Target reached for {asin}! Posting to Telegram...")
-            send_telegram(title, deal_price, regular_price, asin, image_url)
-            item["last_price"] = deal_price
-            updated = True
-        elif last_price is None:
-            item["last_price"] = deal_price
-            updated = True
+        for d in deals:
+            if d["asin"] not in posted_asins:
+                deals_to_post.append(d)
 
         time.sleep(2)
 
-    if updated:
-        with open("products.json", "w") as f:
-            json.dump(products, f, indent=2)
-        print("[INFO] Saved updated baseline to products.json.")
+    # Sort discovered deals by highest discount first
+    deals_to_post.sort(key=lambda x: x["discount"], reverse=True)
+
+    posted_count = 0
+    newly_posted_asins = []
+
+    for deal in deals_to_post:
+        if posted_count >= MAX_DEALS_PER_RUN:
+            break
+
+        sent = send_telegram(deal)
+        if sent:
+            posted_asins.add(deal["asin"])
+            newly_posted_asins.append(deal["asin"])
+            posted_count += 1
+            time.sleep(3)
+
+    if newly_posted_asins:
+        # Keep only the last 500 ASINs to prevent the history file from bloating
+        trimmed_history = list(posted_asins)[-500:]
+        with open(history_file, "w") as f:
+            json.dump(trimmed_history, f, indent=2)
+        print(f"[INFO] Broadcasted {posted_count} loot deals. Updated {history_file}.")
+    else:
+        print("[INFO] No new deals met the criteria this run.")
 
 
 if __name__ == "__main__":
