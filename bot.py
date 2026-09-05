@@ -15,7 +15,8 @@ ALLOWED_BRANDS = ["jbl", "oneplus", "bose", "samsung", "oppo", "realme"]
 
 BLOCKED_BRANDS = [
     "noise", "boat", "boult", "ptron", "mivi", "fire-boltt",
-    "zebronics", "hammer", "portronics", "ambrane", "truke", "wings", "qqlike"
+    "zebronics", "hammer", "portronics", "ambrane", "truke", "wings",
+    "qqlike", "qexle", "czartech", "techonto"
 ]
 
 CLONE_KEYWORDS = [
@@ -28,10 +29,12 @@ JUNK_KEYWORDS = [
     "pouch", "skin", "cleaning kit", "cable protector", "stand holder", "silicone"
 ]
 
+# Words that legitimately precede a brand name in official titles
+ALLOWED_PREFIXES = ["all-new", "new", "newly", "the", "latest"]
+
 BRAND_MIN_DISCOUNT = 15
 MAX_DEALS_PER_RUN = 3
 
-# High-yield feeds targeting authentic brand listings
 FEEDS = [
     {
         "store": "Amazon",
@@ -49,7 +52,6 @@ FEEDS = [
 
 
 def fetch_page(url, retries=2):
-    # Pass params dict directly so requests handles URL encoding cleanly without double-encoding
     params = {
         "api_key": SCRAPER_API_KEY,
         "url": url,
@@ -88,20 +90,28 @@ def clean_price(text):
 def is_genuine_brand_product(title):
     title_lower = title.lower()
 
-    # Reject third-party accessories pretending to be compatible
-    if any(clone_phrase in title_lower for clone_phrase in CLONE_KEYWORDS):
+    # Reject third-party accessories pretending compatibility
+    if any(clone in title_lower for clone in CLONE_KEYWORDS):
         return False
 
-    # Reject competitor budget brands
+    # Reject known competitor budget/clone brands
     for blocked in BLOCKED_BRANDS:
         if re.search(r"\b" + re.escape(blocked) + r"\b", title_lower):
             return False
 
-    # Authentic items: brand name must occur within the first 6 words
-    tokens = re.findall(r"\b[a-z0-9]+\b", title_lower)
-    first_six = tokens[:6] if len(tokens) >= 6 else tokens
+    tokens = re.findall(r"\b[a-z0-9-]+\b", title_lower)
+    if not tokens:
+        return False
 
-    return any(brand in first_six for brand in ALLOWED_BRANDS)
+    # Strip allowed promotional prefixes like "All-New" or "New"
+    while tokens and tokens[0] in ALLOWED_PREFIXES:
+        tokens.pop(0)
+
+    if not tokens:
+        return False
+
+    # STRICT RULE: The leading word MUST be the authentic brand itself
+    return tokens[0] in ALLOWED_BRANDS
 
 
 def is_junk_item(title):
@@ -116,12 +126,17 @@ def get_title_signature(title):
 
 
 def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, store):
+    # Reject banners or stub headlines (must be a full title)
+    if not title or len(title) < 15:
+        return None
+
     if not deal_price or deal_price < 299:
         return None
 
     if is_junk_item(title):
         return None
 
+    # Enforce strict first-word brand authenticity
     if not is_genuine_brand_product(title):
         return None
 
