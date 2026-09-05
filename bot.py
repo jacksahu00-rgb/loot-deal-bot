@@ -1,264 +1,194 @@
-"""
-Amazon India Deal Alert Bot
-----------------------------
-Scrapes tracked Amazon.in ASINs, compares current price against a threshold
-and/or the last recorded price, and sends a Telegram photo alert when a
-genuine price drop is detected. State (last known price) is persisted in
-products.json, which this script rewrites and which your CI workflow
-commits back to the repo.
-
-Env vars required (set as GitHub Actions secrets):
-    TELEGRAM_BOT_TOKEN
-    TELEGRAM_CHAT_ID
-    AMAZON_AFFILIATE_TAG
-"""
-
-import json
 import os
 import re
+import json
 import time
-import random
-import logging
-from pathlib import Path
-
 import requests
 from bs4 import BeautifulSoup
+from amazoncaptcha import AmazonCaptcha
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+AFFILIATE_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "deal-21")
 
-# ---------- CONFIG ----------
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PLACEHOLDER_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PLACEHOLDER_CHAT_ID")
-AMAZON_AFFILIATE_TAG = os.environ.get("AMAZON_AFFILIATE_TAG", "yourtag-21")
-CHANNEL_TITLE = "🔥 DAILY DEAL ALERTS 🔥"
-
-PRODUCTS_FILE = Path("products.json")
-REQUEST_DELAY_RANGE = (3, 7)  # polite delay between product checks, in seconds
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
-def get_headers():
-    """Rotate a realistic browser-like header set for each request."""
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept-Language": "en-IN,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Referer": "https://www.google.com/",
-        "DNT": "1",
-    }
-
-
-def load_products():
-    if not PRODUCTS_FILE.exists():
-        raise FileNotFoundError("products.json not found — create it with your tracked ASINs first.")
-    with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_products(products):
-    with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(products, f, indent=2, ensure_ascii=False)
-
-
-def clean_price(text):
-    """Extract a float from strings like '₹1,499.00' or 'M.R.P.: ₹2,999'."""
-    if not text:
-        return None
-    match = re.search(r"[\d,]+(?:\.\d+)?", text.replace("\xa0", ""))
-    if not match:
-        return None
-    try:
-        return float(match.group().replace(",", ""))
-    except ValueError:
-        return None
-
-
-def build_affiliate_link(asin):
-    return f"https://www.amazon.in/dp/{asin}?tag={AMAZON_AFFILIATE_TAG}"
-
-
-def fetch_product_data(asin, session, max_retries=3):
-    """
-    Fetch and parse a single Amazon.in product page.
-    Returns dict with title, deal_price, mrp, image_url — or None on failure.
-
-    NOTE: Amazon frequently changes its markup/selectors. The multiple
-    fallback selectors below are an attempt at resilience, but you should
-    expect to update these periodically.
-    """
+def fetch_product_page(session, asin):
     url = f"https://www.amazon.in/dp/{asin}"
+    for attempt in range(1, 4):
+        print(f"[INFO] Fetching {asin} (Attempt {attempt})...")
+        resp = session.get(url, headers=HEADERS, timeout=25)
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = session.get(url, headers=get_headers(), timeout=15)
-
-            if resp.status_code == 503 or "captcha" in resp.text.lower()[:3000]:
-                logger.warning(f"[{asin}] Blocked / CAPTCHA challenge on attempt {attempt}, backing off")
-                time.sleep(random.uniform(5, 12) * attempt)
-                continue
-
-            if resp.status_code != 200:
-                logger.warning(f"[{asin}] HTTP {resp.status_code} on attempt {attempt}")
-                time.sleep(random.uniform(3, 6))
-                continue
-
+        # Detect Amazon CAPTCHA
+        if "validateCaptcha" in resp.text or "Robot Check" in resp.text:
+            print("[WARNING] Amazon CAPTCHA detected. Attempting auto-solve...")
             soup = BeautifulSoup(resp.text, "html.parser")
+            form = soup.find("form")
+            if form:
+                img = form.find("img")
+                if img and img.get("src"):
+                    captcha = AmazonCaptcha.fromlink(img["src"])
+                    solution = captcha.solve()
+                    print(f"[INFO] Solved CAPTCHA text: {solution}")
 
-            title_el = soup.select_one("#productTitle")
-            title = title_el.get_text(strip=True) if title_el else None
+                    params = {
+                        inp.get("name"): inp.get("value", "")
+                        for inp in form.find_all("input")
+                        if inp.get("name")
+                    }
+                    params["field-keywords"] = solution
 
-            deal_price = None
-            for sel in [
-                "span.priceToPay span.a-offscreen",
-                "#corePrice_feature_div span.a-offscreen",
-                "#priceblock_dealprice",
-                "#priceblock_ourprice",
-                "span.a-price span.a-offscreen",
-            ]:
-                el = soup.select_one(sel)
-                if el:
-                    price = clean_price(el.get_text())
-                    if price:
-                        deal_price = price
-                        break
+                    action = form.get("action", "/errors/validateCaptcha")
+                    if not action.startswith("http"):
+                        action = f"https://www.amazon.in{action}"
 
-            mrp = None
-            for sel in [
-                "span.a-price.a-text-price span.a-offscreen",
-                ".basisPrice span.a-offscreen",
-                ".a-text-strike",
-            ]:
-                el = soup.select_one(sel)
-                if el:
-                    price = clean_price(el.get_text())
-                    if price and price != deal_price:
-                        mrp = price
-                        break
-            if mrp is None:
-                mrp = deal_price
+                    resp = session.get(action, params=params, headers=HEADERS, timeout=25)
+                    if "validateCaptcha" not in resp.text and "Robot Check" not in resp.text:
+                        print("[SUCCESS] CAPTCHA bypassed successfully!")
+                        return resp.text
 
-            img_el = soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
-            image_url = None
-            if img_el:
-                image_url = img_el.get("data-old-hires") or img_el.get("src")
+            time.sleep(2)
+            continue
 
-            if not title or not deal_price:
-                logger.warning(f"[{asin}] Could not parse title/price — page layout may have changed")
-                return None
+        return resp.text
 
-            return {
-                "title": title,
-                "deal_price": deal_price,
-                "mrp": mrp,
-                "image_url": image_url,
-            }
-
-        except requests.RequestException as e:
-            logger.warning(f"[{asin}] Request error on attempt {attempt}: {e}")
-            time.sleep(random.uniform(3, 6))
-
-    logger.error(f"[{asin}] Failed after {max_retries} attempts")
     return None
 
 
-def send_telegram_alert(product_name, deal_price, mrp, affiliate_link, image_url):
-    discount_pct = None
-    if mrp and mrp > deal_price:
-        discount_pct = round((1 - deal_price / mrp) * 100)
+def parse_details(html):
+    soup = BeautifulSoup(html, "html.parser")
 
-    caption_lines = [
-        f"*{CHANNEL_TITLE}*",
-        "",
-        f"🛍️ *{product_name}*",
-        f"✅ Deal Price: ₹{deal_price:,.0f}" + (f"  ({discount_pct}% OFF)" if discount_pct else ""),
+    # 1. Product Title
+    title_elem = soup.select_one("#productTitle")
+    title = title_elem.get_text(strip=True) if title_elem else "Amazon Deal Product"
+
+    # 2. Current Price
+    deal_price = None
+    price_selectors = [
+        "span.priceToPay span.a-price-whole",
+        "#apex_desktop span.a-price-whole",
+        "#corePriceDisplay_desktop_feature_div span.a-price-whole",
+        "#priceblock_dealprice",
+        "#priceblock_ourprice",
+        "span.a-price span.a-offscreen",
     ]
-    if mrp and mrp > deal_price:
-        caption_lines.append(f"❌ ~Regular Price: ₹{mrp:,.0f}~")
-    caption_lines.append("")
-    caption_lines.append(f"🔗 [Buy Now]({affiliate_link})")
+    for sel in price_selectors:
+        elem = soup.select_one(sel)
+        if elem:
+            cleaned = re.sub(r"[^\d.]", "", elem.get_text(strip=True))
+            if cleaned:
+                deal_price = float(cleaned.split(".")[0])
+                break
 
-    caption = "\n".join(caption_lines)
+    # 3. Regular / MRP Price
+    regular_price = None
+    mrp_selectors = [
+        "span.a-price.a-text-price[data-a-strike='true'] span.a-offscreen",
+        "span.basisPrice span.a-price-whole",
+        "#corePrice_desktop span.a-text-strike",
+        "span.priceBlockStrikePriceString",
+    ]
+    for sel in mrp_selectors:
+        elem = soup.select_one(sel)
+        if elem:
+            cleaned = re.sub(r"[^\d.]", "", elem.get_text(strip=True))
+            if cleaned:
+                val = float(cleaned.split(".")[0])
+                if deal_price and val > deal_price:
+                    regular_price = val
+                    break
 
-    try:
-        if image_url:
-            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            payload = {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "photo": image_url,
-                "caption": caption,
-                "parse_mode": "Markdown",
-            }
-        else:
-            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": caption,
-                "parse_mode": "Markdown",
-            }
+    # 4. Product Image
+    image_url = None
+    img_elem = soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
+    if img_elem:
+        image_url = img_elem.get("data-old-hires") or img_elem.get("src")
 
-        resp = requests.post(api_url, data=payload, timeout=20)
-        if resp.status_code != 200:
-            logger.error(f"Telegram API error: {resp.status_code} {resp.text}")
-        else:
-            logger.info(f"Alert sent: {product_name}")
-    except requests.RequestException as e:
-        logger.error(f"Telegram send failed: {e}")
+    return title, deal_price, regular_price, image_url
+
+
+def send_telegram(title, deal_price, regular_price, asin, image_url):
+    deal_url = f"https://www.amazon.in/dp/{asin}?th=1&tag={AFFILIATE_TAG}"
+
+    caption = f"<b>{title} @ ₹{int(deal_price):,}</b>\n\n"
+    caption += f"🔗 {deal_url}\n\n"
+    if regular_price:
+        caption += f"❌ Regular price @ ₹{int(regular_price):,}"
+
+    if image_url:
+        endpoint = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        res = requests.post(
+            endpoint,
+            data={"chat_id": CHAT_ID, "photo": image_url, "caption": caption, "parse_mode": "HTML"},
+            timeout=20,
+        )
+        if res.status_code == 200:
+            print("[INFO] Telegram photo alert sent successfully!")
+            return
+
+    # Fallback to plain text if photo fails
+    text_endpoint = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(
+        text_endpoint,
+        data={"chat_id": CHAT_ID, "text": caption, "parse_mode": "HTML"},
+        timeout=20,
+    )
+    print("[INFO] Telegram text alert sent successfully!")
 
 
 def main():
-    if TELEGRAM_BOT_TOKEN.startswith("PLACEHOLDER") or TELEGRAM_CHAT_ID.startswith("PLACEHOLDER"):
-        logger.error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set. Configure them as GitHub Actions secrets.")
+    if not os.path.exists("products.json"):
+        print("[ERROR] products.json not found!")
         return
 
-    products = load_products()
+    with open("products.json", "r") as f:
+        products = json.load(f)
+
     session = requests.Session()
-    changed = False
+    updated = False
 
-    for product in products:
-        asin = product["asin"]
-        threshold = product.get("threshold_price")
-        last_price = product.get("last_price")
+    for item in products:
+        asin = item.get("asin")
+        threshold = item.get("threshold_price", float("inf"))
+        last_price = item.get("last_price")
 
-        logger.info(f"Checking {asin} ...")
-        data = fetch_product_data(asin, session)
-        time.sleep(random.uniform(*REQUEST_DELAY_RANGE))
-
-        if not data:
+        html = fetch_product_page(session, asin)
+        if not html:
+            print(f"[ERROR] Could not load product page for {asin}")
             continue
 
-        deal_price = data["deal_price"]
-        should_alert = False
+        title, current_price, regular_price, image_url = parse_details(html)
+        if not current_price:
+            print(f"[WARNING] Could not parse price for {asin}")
+            continue
 
-        if threshold and deal_price <= threshold:
-            should_alert = True
-        elif last_price and deal_price < last_price:
-            should_alert = True
-        # First time seeing this ASIN: just record baseline, don't spam an alert.
+        print(f"[INFO] {asin} | Current: ₹{current_price} | Target: ₹{threshold} | Last: {last_price}")
 
-        if should_alert:
-            affiliate_link = build_affiliate_link(asin)
-            send_telegram_alert(data["title"], deal_price, data["mrp"], affiliate_link, data["image_url"])
+        # Trigger if price is within budget and changed from last run
+        if current_price <= threshold and (last_price is None or current_price < last_price):
+            print(f"[ALERT] Deal found for {asin}! Sending Telegram post...")
+            send_telegram(title, current_price, regular_price, asin, image_url)
+            item["last_price"] = current_price
+            updated = True
+        elif last_price is None:
+            item["last_price"] = current_price
+            updated = True
 
-        if last_price != deal_price:
-            product["last_price"] = deal_price
-            product["last_title"] = data["title"]
-            changed = True
+        time.sleep(2)
 
-    if changed:
-        save_products(products)
-        logger.info("products.json updated with new prices.")
-    else:
-        logger.info("No price changes detected this run.")
+    if updated:
+        with open("products.json", "w") as f:
+            json.dump(products, f, indent=2)
+        print("[INFO] products.json updated.")
 
 
 if __name__ == "__main__":
