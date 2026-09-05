@@ -11,18 +11,17 @@ AMAZON_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "lootdeals-21")
 FLIPKART_AFFID = os.getenv("FLIPKART_AFFILIATE_ID", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
-# Target brands (case-insensitive)
 ALLOWED_BRANDS = ["jbl", "oneplus", "bose", "samsung", "oppo", "realme"]
 
-# Blacklist to ignore fake 80-90% off junk accessories
 JUNK_KEYWORDS = [
     "back cover", "case", "strap", "tempered glass", "screen protector",
-    "pouch", "skin", "cleaning kit", "cable protector", "stand holder"
+    "pouch", "skin", "cleaning kit", "cable protector", "stand holder", "silicone"
 ]
 
 BRAND_MIN_DISCOUNT = 15
 MAX_DEALS_PER_RUN = 3
 
+# Targeted, clean feeds for both stores
 FEEDS = [
     {
         "store": "Amazon",
@@ -34,7 +33,8 @@ FEEDS = [
     },
     {
         "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=oneplus+jbl+bose+samsung+oppo+realme+headphones&sort=popularity"
+        # Flipkart audio feed filtered directly by your brands
+        "url": "https://www.flipkart.com/audio-video/headphones/pr?sid=0pm%2Cf3v&p%5B%5D=facets.brand%255B%255D%3DJBL&p%5B%5D=facets.brand%255B%255D%3DOnePlus&p%5B%5D=facets.brand%255B%255D%3Drealme&p%5B%5D=facets.brand%255B%255D%3DSAMSUNG&p%5B%5D=facets.brand%255B%255D%3DOppo&p%5B%5D=facets.brand%255B%255D%3DBose"
     }
 ]
 
@@ -43,7 +43,7 @@ def fetch_page(url):
     api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&country_code=in&keep_headers=true"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
+        "Accept-Language": "en-IN,en;q=0.9",
     }
     try:
         response = requests.get(api_url, headers=headers, timeout=45)
@@ -75,18 +75,22 @@ def is_junk_item(title):
     return any(kw in title_lower for kw in JUNK_KEYWORDS)
 
 
+def get_title_signature(title):
+    # Extracts the first 4 meaningful words to prevent posting color/size variants
+    cleaned = re.sub(r"[^\w\s]", " ", title.lower())
+    words = [w for w in cleaned.split() if w not in ["with", "for", "in", "and", "the", "true", "wireless"]][:4]
+    return " ".join(words)
+
+
 def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, store):
-    # Minimum price check (filters out ₹49/₹99 fake items)
     if not deal_price or deal_price < 299:
         return None
 
-    # Filter out cases, straps, screen protectors
     if is_junk_item(title):
         return None
 
-    has_brand = is_allowed_brand(title)
-    if not has_brand:
-        return None  # Strictly enforce your selected brands
+    if not is_allowed_brand(title):
+        return None
 
     if mrp_price and mrp_price > deal_price:
         discount = int(((mrp_price - deal_price) / mrp_price) * 100)
@@ -94,14 +98,13 @@ def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, 
         discount = 0
 
     short_title = title[:82] + "..." if len(title) > 85 else title
-
-    # Glitch Criteria for your preferred brands: 55%+ discount or huge price collapse
     is_glitch = discount >= 55 or (mrp_price and mrp_price >= 3000 and deal_price <= 799)
     is_brand_deal = discount >= BRAND_MIN_DISCOUNT
 
     if is_glitch or is_brand_deal:
         return {
             "id": unique_id,
+            "signature": get_title_signature(title),
             "store": store,
             "title": short_title,
             "deal_price": deal_price,
@@ -154,26 +157,22 @@ def parse_flipkart(html):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # Try both grid and row product wrappers used by Flipkart
+    # Match product cards by data-id or common listing rows
     cards = soup.select("div[data-id]")
     if not cards:
-        cards = soup.select("div._1AtVbE")
+        cards = soup.select("div._1AtVbE, div.cPHDOP, div.slAVV4")
 
     for card in cards:
-        pid = card.get("data-id")
-
         link_el = card.select_one("a[href*='/p/']")
         if not link_el:
             continue
 
-        if not pid:
-            match = re.search(r"pid=([A-Z0-9]+)", link_el.get("href", ""))
-            pid = match.group(1) if match else None
-
+        raw_href = link_el.get("href", "")
+        pid_match = re.search(r"pid=([A-Z0-9]+)", raw_href)
+        pid = card.get("data-id") or (pid_match.group(1) if pid_match else None)
         if not pid:
             continue
 
-        raw_href = link_el.get("href", "")
         clean_path = raw_href.split("?")[0] if "?" in raw_href else raw_href
         base_url = f"https://www.flipkart.com{clean_path}"
         deal_url = f"{base_url}?affid={FLIPKART_AFFID}" if FLIPKART_AFFID else base_url
@@ -190,11 +189,19 @@ def parse_flipkart(html):
         if not title:
             continue
 
-        price_el = card.select_one("div.Nx9bqj") or card.select_one("div._30jeq3")
-        deal_price = clean_price(price_el.get_text(strip=True)) if price_el else None
+        # Extract prices using regex to bypass obfuscated class names
+        card_text = card.get_text(separator=" ")
+        prices = [clean_price(p) for p in re.findall(r"₹\s*([0-9,]+)", card_text)]
+        prices = [p for p in prices if p and p > 100]
 
-        mrp_el = card.select_one("div.yRaY8j") or card.select_one("div._3I9_wc")
-        mrp_price = clean_price(mrp_el.get_text(strip=True)) if mrp_el else None
+        deal_price = None
+        mrp_price = None
+
+        if len(prices) >= 2:
+            deal_price = min(prices[0], prices[1])
+            mrp_price = max(prices[0], prices[1])
+        elif len(prices) == 1:
+            deal_price = prices[0]
 
         img_el = card.select_one("img[src*='rukminim']") or card.select_one("img")
         image_url = img_el.get("src") if img_el else None
@@ -268,6 +275,7 @@ def main():
             posted_ids = set()
 
     deals_to_post = []
+    current_run_signatures = set()
 
     for feed in FEEDS:
         print(f"[INFO] Scanning {feed['store']} feed...")
@@ -279,8 +287,10 @@ def main():
         print(f"[INFO] Found {len(deals)} valid brand items from {feed['store']}.")
 
         for d in deals:
-            if d["id"] not in posted_ids:
+            # Check ASIN/PID duplicate AND variant signature duplicate
+            if d["id"] not in posted_ids and d["signature"] not in current_run_signatures:
                 deals_to_post.append(d)
+                current_run_signatures.add(d["signature"])
 
         time.sleep(2)
 
@@ -305,9 +315,9 @@ def main():
         trimmed = list(posted_ids)[-500:]
         with open(history_file, "w") as f:
             json.dump(trimmed, f, indent=2)
-        print(f"[INFO] Posted {posted_count} brand deals to Telegram. History updated.")
+        print(f"[INFO] Posted {posted_count} unique brand deals. History updated.")
     else:
-        print("[INFO] No new brand deals met criteria this run.")
+        print("[INFO] No new unique brand deals met criteria this run.")
 
 
 if __name__ == "__main__":
