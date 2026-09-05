@@ -1,12 +1,7 @@
 [
   {
-    "asin": "B0BXYZ1234",
-    "threshold_price": 1999,
-    "last_price": null
-  },
-  {
-    "asin": "B0CDEF5678",
-    "threshold_price": 4999,
+    "asin": "B0DF2Z6WKD",
+    "threshold_price": 2000,
     "last_price": null
   }
 ]
