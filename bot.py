@@ -3,7 +3,6 @@ import re
 import json
 import time
 import requests
-from urllib.parse import quote
 from bs4 import BeautifulSoup
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -19,7 +18,6 @@ BLOCKED_BRANDS = [
     "zebronics", "hammer", "portronics", "ambrane", "truke", "wings", "qqlike"
 ]
 
-# Clone sellers exploit these keywords to mimic genuine brands
 CLONE_KEYWORDS = [
     "compatible with", "compatible for", "suitable for", "replacement for",
     "designed for", "supports", "for oneplus", "for samsung", "for jbl", "for bose"
@@ -33,27 +31,31 @@ JUNK_KEYWORDS = [
 BRAND_MIN_DISCOUNT = 15
 MAX_DEALS_PER_RUN = 3
 
-# 3 balanced feeds (Page 1 + Page 2) ensures fresh deals without quota burn
+# High-yield feeds targeting authentic brand listings
 FEEDS = [
     {
         "store": "Amazon",
-        "url": "https://www.amazon.in/s?i=electronics&rh=p_89%3ABose%7Cp_89%3AJBL%7Cp_89%3AOnePlus%7Cp_89%3AOppo%7Cp_89%3ARealme%7Cp_89%3ASamsung&s=popularity-rank"
+        "url": "https://www.amazon.in/s?k=oneplus+buds&s=popularity-rank"
     },
     {
         "store": "Amazon",
-        # Page 2 keeps pipeline full when page 1 items are already posted
-        "url": "https://www.amazon.in/s?i=electronics&rh=p_89%3ABose%7Cp_89%3AJBL%7Cp_89%3AOnePlus%7Cp_89%3AOppo%7Cp_89%3ARealme%7Cp_89%3ASamsung&page=2&s=popularity-rank"
+        "url": "https://www.amazon.in/s?k=jbl+earbuds&s=popularity-rank"
     },
     {
         "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=oneplus+realme+jbl+buds&sort=popularity"
+        "url": "https://www.flipkart.com/search?q=oneplus+buds&sort=popularity"
     }
 ]
 
 
 def fetch_page(url, retries=2):
-    encoded_target = quote(url, safe="")
-    api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={encoded_target}&country_code=in&keep_headers=true"
+    # Pass params dict directly so requests handles URL encoding cleanly without double-encoding
+    params = {
+        "api_key": SCRAPER_API_KEY,
+        "url": url,
+        "country_code": "in",
+        "keep_headers": "true"
+    }
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "en-IN,en;q=0.9",
@@ -61,15 +63,15 @@ def fetch_page(url, retries=2):
 
     for attempt in range(1, retries + 1):
         try:
-            response = requests.get(api_url, headers=headers, timeout=60)
-            if response.status_code == 200:
+            response = requests.get("http://api.scraperapi.com", params=params, headers=headers, timeout=60)
+            if response.status_code == 200 and len(response.text) > 1500:
                 return response.text
-            print(f"[WARNING] Proxy HTTP {response.status_code} (attempt {attempt}/{retries})")
+            print(f"[WARNING] Proxy status {response.status_code} (attempt {attempt}/{retries})")
         except Exception as err:
             print(f"[WARNING] Fetch error on attempt {attempt}/{retries}: {err}")
         time.sleep(3)
 
-    print(f"[ERROR] Failed to fetch feed after {retries} attempts.")
+    print(f"[ERROR] Failed to fetch feed after {retries} attempts: {url}")
     return None
 
 
@@ -86,20 +88,20 @@ def clean_price(text):
 def is_genuine_brand_product(title):
     title_lower = title.lower()
 
-    # 1. Reject compatibility/clone phrasing
+    # Reject third-party accessories pretending to be compatible
     if any(clone_phrase in title_lower for clone_phrase in CLONE_KEYWORDS):
         return False
 
-    # 2. Reject budget/competitor brands
+    # Reject competitor budget brands
     for blocked in BLOCKED_BRANDS:
         if re.search(r"\b" + re.escape(blocked) + r"\b", title_lower):
             return False
 
-    # 3. Genuine products: The brand name MUST appear in the first 4 words
+    # Authentic items: brand name must occur within the first 6 words
     tokens = re.findall(r"\b[a-z0-9]+\b", title_lower)
-    first_four = tokens[:4] if len(tokens) >= 4 else tokens
+    first_six = tokens[:6] if len(tokens) >= 6 else tokens
 
-    return any(brand in first_four for brand in ALLOWED_BRANDS)
+    return any(brand in first_six for brand in ALLOWED_BRANDS)
 
 
 def is_junk_item(title):
@@ -120,7 +122,6 @@ def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, 
     if is_junk_item(title):
         return None
 
-    # Strict authenticity & brand verification
     if not is_genuine_brand_product(title):
         return None
 
@@ -262,7 +263,7 @@ def send_telegram(deal):
         caption += f"<b>{deal['title']}</b>\n\n"
         caption += f"💰 <b>Deal Price:</b> ₹{int(deal['deal_price']):,}\n"
         if deal["mrp_price"]:
-            caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n"
+            caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n\n"
         else:
             caption += "\n"
         caption += f"🛒 <b>Buy Now:</b>\n{deal['deal_url']}"
@@ -307,7 +308,7 @@ def main():
     current_run_signatures = set()
 
     for feed in FEEDS:
-        print(f"[INFO] Scanning {feed['store']} feed...")
+        print(f"[INFO] Scanning {feed['store']} feed: {feed['url'][:45]}...")
         html = fetch_page(feed["url"])
         if not html:
             continue
@@ -342,7 +343,7 @@ def main():
         trimmed = list(posted_ids)[-500:]
         with open(history_file, "w") as f:
             json.dump(trimmed, f, indent=2)
-        print(f"[INFO] Posted {posted_count} verified deals. History updated.")
+        print(f"[INFO] Posted {posted_count} verified brand deals. History updated.")
     else:
         print("[INFO] No new verified brand deals met criteria this run.")
 
