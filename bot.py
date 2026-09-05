@@ -31,46 +31,46 @@ JUNK_KEYWORDS = [
 
 ALLOWED_PREFIXES = ["all-new", "new", "newly", "the", "latest"]
 
-# Minimum percentage discount from MRP to qualify as an instant flash loot
 INSTANT_LOOT_DISCOUNT = 50
 MAX_DEALS_PER_RUN = 3
 
+# 3 targeted feeds = 4,320 requests/month (stays under ScraperAPI's 5,000 credit limit)
 FEEDS = [
     {
+        # Amazon: Covers all 6 brands using brand facet filters
         "store": "Amazon",
-        "url": "https://www.amazon.in/s?k=oneplus+buds&s=popularity-rank"
+        "url": "https://www.amazon.in/s?k=earbuds&rh=p_89%3ABose%7Cp_89%3AJBL%7Cp_89%3AOnePlus%7Cp_89%3AOppo%7Cp_89%3ARealme%7Cp_89%3ASamsung&s=popularity-rank"
     },
     {
-        "store": "Amazon",
-        "url": "https://www.amazon.in/s?k=jbl+earbuds&s=popularity-rank"
-    },
-    {
+        # Flipkart: OnePlus, realme, and JBL audio
         "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=oneplus+buds&sort=popularity"
+        "url": "https://www.flipkart.com/search?q=oneplus+realme+jbl+earbuds&sort=popularity"
     },
     {
+        # Flipkart: Samsung, OPPO, and Bose audio
         "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=realme+buds&sort=popularity"
+        "url": "https://www.flipkart.com/search?q=samsung+oppo+bose+earbuds&sort=popularity"
     }
 ]
 
 
 def fetch_page(url, retries=2):
+    # Parameters let ScraperAPI handle pristine header rotation dynamically
     params = {
         "api_key": SCRAPER_API_KEY,
         "url": url,
-        "country_code": "in",
-        "keep_headers": "true"
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "en-IN,en;q=0.9",
+        "country_code": "in"
     }
 
     for attempt in range(1, retries + 1):
         try:
-            response = requests.get("http://api.scraperapi.com", params=params, headers=headers, timeout=60)
-            if response.status_code == 200 and len(response.text) > 1500:
+            response = requests.get("http://api.scraperapi.com", params=params, timeout=60)
+            if response.status_code == 200 and len(response.text) > 2000:
+                # Catch silent Amazon CAPTCHA splash pages and retry
+                if "api-services-support@amazon.com" in response.text or "Robot Check" in response.text:
+                    print(f"[WARNING] Amazon CAPTCHA detected (attempt {attempt}/{retries}). Retrying...")
+                    time.sleep(4)
+                    continue
                 return response.text
             print(f"[WARNING] Proxy status {response.status_code} (attempt {attempt}/{retries})")
         except Exception as err:
@@ -110,6 +110,7 @@ def is_genuine_brand_product(title):
     if not tokens:
         return False
 
+    # Leading word must be one of your verified brands
     return tokens[0] in ALLOWED_BRANDS
 
 
@@ -156,15 +157,15 @@ def extract_deal_info(title, deal_price, mrp_price, image_url, deal_url, unique_
 
 def parse_amazon(html):
     soup = BeautifulSoup(html, "html.parser")
-    items = soup.select('div[data-component-type="s-search-result"]')
+    items = soup.select('div[data-asin]:not([data-asin=""])')
     results = []
 
     for item in items:
-        asin = item.get("data-asin")
-        if not asin:
+        asin = item.get("data-asin", "").strip()
+        if not asin or len(asin) != 10 or not asin.isalnum():
             continue
 
-        title_el = item.select_one("h2 span") or item.select_one("h2 a span")
+        title_el = item.select_one("h2 span") or item.select_one("h2 a span") or item.select_one("h2")
         if not title_el:
             continue
         title = title_el.get_text(strip=True)
@@ -314,7 +315,6 @@ def main():
                 if isinstance(raw_data, dict):
                     history = raw_data
                 elif isinstance(raw_data, list):
-                    # Migrate old list format to price-history dictionary
                     history = {item_id: {"base_price": None} for item_id in raw_data}
         except Exception:
             history = {}
@@ -328,7 +328,7 @@ def main():
             continue
 
         deals = parse_amazon(html) if feed["store"] == "Amazon" else parse_flipkart(html)
-        print(f"[INFO] Discovered {len(deals)} brand items on {feed['store']}.")
+        print(f"[INFO] Discovered {len(deals)} genuine brand items on {feed['store']}.")
         discovered_items.extend(deals)
         time.sleep(2)
 
@@ -345,7 +345,7 @@ def main():
         if sig in current_run_signatures:
             continue
 
-        # Case 1: Extreme Price Glitch (always trigger immediately)
+        # Case 1: Extreme Price Glitch
         is_glitch = discount >= 65 or (mrp and mrp >= 3000 and current_price <= 799)
         if is_glitch:
             item["is_glitch"] = True
@@ -354,10 +354,9 @@ def main():
             history[uid] = {"base_price": current_price}
             continue
 
-        # Case 2: Product already known -> Check for a real price drop
+        # Case 2: Known product dropping below recorded baseline
         if uid in history and history[uid].get("base_price"):
             base_price = history[uid]["base_price"]
-            # Trigger if price dropped by at least ₹200 or 5% below previous price
             if current_price < base_price and (base_price - current_price >= 200 or (base_price - current_price) / base_price >= 0.05):
                 item["is_price_drop"] = True
                 item["previous_price"] = base_price
@@ -367,12 +366,10 @@ def main():
                 history[uid]["base_price"] = current_price
                 continue
             elif current_price < base_price:
-                # Minor reduction; update lowest without triggering alert
                 history[uid]["base_price"] = current_price
 
-        # Case 3: First time seeing this product
+        # Case 3: First-time seen product
         if uid not in history:
-            # If it's already an extreme deal (>= 50% off MRP), post as Loot
             if discount >= INSTANT_LOOT_DISCOUNT:
                 item["is_price_drop"] = False
                 item["is_glitch"] = False
@@ -380,11 +377,9 @@ def main():
                 current_run_signatures.add(sig)
                 history[uid] = {"base_price": current_price}
             else:
-                # Normal everyday price (e.g. ₹8,499) -> Save baseline, do NOT post yet
                 history[uid] = {"base_price": current_price}
                 print(f"[BASELINE] Saved {item['title'][:40]} at ₹{int(current_price)} (waiting for drop)")
 
-    # Sort alerts: glitches first, then highest price drops
     alerts_to_send.sort(key=lambda x: (x.get("is_glitch", False), x.get("drop_amount", 0)), reverse=True)
 
     posted_count = 0
@@ -396,7 +391,11 @@ def main():
             posted_count += 1
             time.sleep(3)
 
-    # Save updated baselines
+    # Trim tracking history to last 500 items to keep repository commits small
+    if len(history) > 500:
+        keys_to_keep = list(history.keys())[-500:]
+        history = {k: history[k] for k in keys_to_keep}
+
     with open(history_file, "w") as f:
         json.dump(history, f, indent=2)
     print(f"[INFO] Run complete. {posted_count} price drop/glitch alerts sent. Baselines updated.")
