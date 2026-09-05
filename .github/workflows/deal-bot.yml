@@ -2,8 +2,8 @@ name: Deal Bot
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Automatically checks every 30 minutes
-  workflow_dispatch:        # Enables the manual "Run workflow" button
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -30,6 +30,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python bot.py
 
       - name: Commit updated price baseline
