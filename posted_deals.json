@@ -49,5 +49,8 @@
   },
   "fk_ACCHYRHPDUU2HUGG": {
     "base_price": 1299.0
+  },
+  "fk_ACCGSUP92HSCUUSP": {
+    "base_price": 1799.0
   }
 }
