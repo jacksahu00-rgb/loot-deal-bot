@@ -343,21 +343,25 @@ def main():
 
         if sig in current_run_signatures:
             continue
-
-        is_glitch = discount >= 65 or (mrp and mrp >= 3000 and current_price <= 799)
-        if is_glitch:
+# Case 1: Genuine Severe Glitch / Pricing Bug (80%+ off or ₹3000+ item selling under ₹499)
+        is_extreme_glitch = discount >= 80 or (mrp and mrp >= 3000 and current_price <= 499)
+        if is_extreme_glitch:
             item["is_glitch"] = True
             alerts_to_send.append(item)
             current_run_signatures.add(sig)
             history[uid] = {"base_price": current_price}
             continue
 
+        # Case 2: Known product whose price dropped below its recorded baseline
         if uid in history and history[uid].get("base_price"):
             base_price = history[uid]["base_price"]
-            if current_price < base_price and (base_price - current_price >= 200 or (base_price - current_price) / base_price >= 0.05):
+            price_drop = base_price - current_price
+            
+            # Triggers if price dropped by at least ₹150 or 5% below previous deal price
+            if current_price < base_price and (price_drop >= 150 or (price_drop / base_price) >= 0.05):
                 item["is_price_drop"] = True
                 item["previous_price"] = base_price
-                item["drop_amount"] = base_price - current_price
+                item["drop_amount"] = price_drop
                 alerts_to_send.append(item)
                 current_run_signatures.add(sig)
                 history[uid]["base_price"] = current_price
@@ -365,16 +369,10 @@ def main():
             elif current_price < base_price:
                 history[uid]["base_price"] = current_price
 
+        # Case 3: First-time seen product -> Always save to baseline silently
         if uid not in history:
-            if discount >= INSTANT_LOOT_DISCOUNT:
-                item["is_price_drop"] = False
-                item["is_glitch"] = False
-                alerts_to_send.append(item)
-                current_run_signatures.add(sig)
-                history[uid] = {"base_price": current_price}
-            else:
-                history[uid] = {"base_price": current_price}
-                print(f"[BASELINE] Saved {item['title'][:40]} at ₹{int(current_price)} (waiting for drop)")
+            history[uid] = {"base_price": current_price}
+            print(f"[BASELINE] Recorded {item['title'][:40]} at ₹{int(current_price)} (waiting for real drop)")
 
     alerts_to_send.sort(key=lambda x: (x.get("is_glitch", False), x.get("drop_amount", 0)), reverse=True)
 
