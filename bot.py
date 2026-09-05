@@ -3,6 +3,7 @@ import re
 import json
 import time
 import requests
+from urllib.parse import quote
 from bs4 import BeautifulSoup
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -21,7 +22,6 @@ JUNK_KEYWORDS = [
 BRAND_MIN_DISCOUNT = 15
 MAX_DEALS_PER_RUN = 3
 
-# Targeted, clean feeds for both stores
 FEEDS = [
     {
         "store": "Amazon",
@@ -33,14 +33,15 @@ FEEDS = [
     },
     {
         "store": "Flipkart",
-        # Flipkart audio feed filtered directly by your brands
-        "url": "https://www.flipkart.com/audio-video/headphones/pr?sid=0pm%2Cf3v&p%5B%5D=facets.brand%255B%255D%3DJBL&p%5B%5D=facets.brand%255B%255D%3DOnePlus&p%5B%5D=facets.brand%255B%255D%3Drealme&p%5B%5D=facets.brand%255B%255D%3DSAMSUNG&p%5B%5D=facets.brand%255B%255D%3DOppo&p%5B%5D=facets.brand%255B%255D%3DBose"
+        "url": "https://www.flipkart.com/search?q=wireless+earbuds&sort=popularity"
     }
 ]
 
 
 def fetch_page(url):
-    api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&country_code=in&keep_headers=true"
+    # Properly URL-encode target so ScraperAPI does not truncate query strings
+    encoded_target = quote(url, safe="")
+    api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={encoded_target}&country_code=in&keep_headers=true"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "en-IN,en;q=0.9",
@@ -76,9 +77,8 @@ def is_junk_item(title):
 
 
 def get_title_signature(title):
-    # Extracts the first 4 meaningful words to prevent posting color/size variants
     cleaned = re.sub(r"[^\w\s]", " ", title.lower())
-    words = [w for w in cleaned.split() if w not in ["with", "for", "in", "and", "the", "true", "wireless"]][:4]
+    words = [w for w in cleaned.split() if w not in ["with", "for", "in", "and", "the", "true", "wireless", "earbuds", "headphones"]][:4]
     return " ".join(words)
 
 
@@ -157,10 +157,8 @@ def parse_flipkart(html):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # Match product cards by data-id or common listing rows
-    cards = soup.select("div[data-id]")
-    if not cards:
-        cards = soup.select("div._1AtVbE, div.cPHDOP, div.slAVV4")
+    # Comprehensive container selectors across Flipkart grid & list templates
+    cards = soup.select("div[data-id], div._1sdMkc, div.slAVV4, div._1AtVbE")
 
     for card in cards:
         link_el = card.select_one("a[href*='/p/']")
@@ -177,34 +175,38 @@ def parse_flipkart(html):
         base_url = f"https://www.flipkart.com{clean_path}"
         deal_url = f"{base_url}?affid={FLIPKART_AFFID}" if FLIPKART_AFFID else base_url
 
-        title_el = (
-            card.select_one("div.wjcEIp")
-            or card.select_one("div.KzDlHZ")
-            or card.select_one("a.s1Q9rs")
-            or card.select_one("div._4rR01T")
-            or card.select_one("a[title]")
-            or link_el
-        )
-        title = title_el.get("title") or title_el.get_text(strip=True) if title_el else ""
+        # Check title attributes across multiple Flipkart layouts
+        img_el = card.select_one("img[src*='rukminim']") or card.select_one("img")
+        image_url = img_el.get("src") if img_el else None
+
+        title = None
+        for selector in ["a.wjcEIp", "div.KzDlHZ", "a.s1Q9rs", "div._4rR01T", "a[title]"]:
+            el = card.select_one(selector)
+            if el:
+                title = el.get("title") or el.get_text(strip=True)
+                if title:
+                    break
+
+        # Fall back to image alt tag if text node is obfuscated
+        if not title and img_el:
+            title = img_el.get("alt", "").strip()
+
         if not title:
             continue
 
-        # Extract prices using regex to bypass obfuscated class names
+        # Extract prices via regex to stay immune to obfuscated CSS class hashes
         card_text = card.get_text(separator=" ")
-        prices = [clean_price(p) for p in re.findall(r"₹\s*([0-9,]+)", card_text)]
-        prices = [p for p in prices if p and p > 100]
+        extracted = [clean_price(p) for p in re.findall(r"₹\s*([0-9,]+)", card_text)]
+        extracted = [p for p in extracted if p and p > 100]
 
         deal_price = None
         mrp_price = None
 
-        if len(prices) >= 2:
-            deal_price = min(prices[0], prices[1])
-            mrp_price = max(prices[0], prices[1])
-        elif len(prices) == 1:
-            deal_price = prices[0]
-
-        img_el = card.select_one("img[src*='rukminim']") or card.select_one("img")
-        image_url = img_el.get("src") if img_el else None
+        if len(extracted) >= 2:
+            deal_price = min(extracted[0], extracted[1])
+            mrp_price = max(extracted[0], extracted[1])
+        elif len(extracted) == 1:
+            deal_price = extracted[0]
 
         unique_id = f"fk_{pid}"
 
@@ -232,7 +234,7 @@ def send_telegram(deal):
         caption += f"<b>{deal['title']}</b>\n\n"
         caption += f"💰 <b>Deal Price:</b> ₹{int(deal['deal_price']):,}\n"
         if deal["mrp_price"]:
-            caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n\n"
+            caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n"
         else:
             caption += "\n"
         caption += f"🛒 <b>Buy Now:</b>\n{deal['deal_url']}"
@@ -287,7 +289,6 @@ def main():
         print(f"[INFO] Found {len(deals)} valid brand items from {feed['store']}.")
 
         for d in deals:
-            # Check ASIN/PID duplicate AND variant signature duplicate
             if d["id"] not in posted_ids and d["signature"] not in current_run_signatures:
                 deals_to_post.append(d)
                 current_run_signatures.add(d["signature"])
