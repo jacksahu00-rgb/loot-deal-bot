@@ -12,8 +12,16 @@ AMAZON_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "lootdeals-21")
 FLIPKART_AFFID = os.getenv("FLIPKART_AFFILIATE_ID", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
+# Brands you explicitly want
 ALLOWED_BRANDS = ["jbl", "oneplus", "bose", "samsung", "oppo", "realme"]
 
+# Competitor / budget brands to block (prevents "Noise with Bose audio", "boAt", etc.)
+BLOCKED_BRANDS = [
+    "noise", "boat", "boult", "ptron", "mivi", "fire-boltt",
+    "zebronics", "hammer", "portronics", "ambrane", "truke", "wings"
+]
+
+# Blacklist to ignore junk accessories
 JUNK_KEYWORDS = [
     "back cover", "case", "strap", "tempered glass", "screen protector",
     "pouch", "skin", "cleaning kit", "cable protector", "stand holder", "silicone"
@@ -22,6 +30,7 @@ JUNK_KEYWORDS = [
 BRAND_MIN_DISCOUNT = 15
 MAX_DEALS_PER_RUN = 3
 
+# Targeted feeds that return your specific brands
 FEEDS = [
     {
         "store": "Amazon",
@@ -33,26 +42,31 @@ FEEDS = [
     },
     {
         "store": "Flipkart",
-        "url": "https://www.flipkart.com/search?q=wireless+earbuds&sort=popularity"
+        # Explicit brand search ensures page 1 is packed with your target brands
+        "url": "https://www.flipkart.com/search?q=oneplus+realme+jbl+buds&sort=popularity"
     }
 ]
 
 
-def fetch_page(url):
-    # Properly URL-encode target so ScraperAPI does not truncate query strings
+def fetch_page(url, retries=2):
     encoded_target = quote(url, safe="")
     api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={encoded_target}&country_code=in&keep_headers=true"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "en-IN,en;q=0.9",
     }
-    try:
-        response = requests.get(api_url, headers=headers, timeout=45)
-        if response.status_code == 200:
-            return response.text
-        print(f"[ERROR] Proxy HTTP {response.status_code} for {url[:45]}...")
-    except Exception as err:
-        print(f"[ERROR] Request failed: {err}")
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.get(api_url, headers=headers, timeout=60)
+            if response.status_code == 200:
+                return response.text
+            print(f"[WARNING] Proxy HTTP {response.status_code} (attempt {attempt}/{retries})")
+        except Exception as err:
+            print(f"[WARNING] Fetch error on attempt {attempt}/{retries}: {err}")
+        time.sleep(3)
+
+    print(f"[ERROR] Failed to fetch feed after {retries} attempts: {url[:50]}...")
     return None
 
 
@@ -66,8 +80,15 @@ def clean_price(text):
         return None
 
 
-def is_allowed_brand(title):
+def is_valid_brand_product(title):
     title_lower = title.lower()
+
+    # Reject if it belongs to a competitor budget brand (e.g. Noise with Bose sound)
+    for blocked in BLOCKED_BRANDS:
+        if re.search(r"\b" + re.escape(blocked) + r"\b", title_lower):
+            return False
+
+    # Verify title contains at least one allowed brand
     return any(re.search(r"\b" + re.escape(brand) + r"\b", title_lower) for brand in ALLOWED_BRANDS)
 
 
@@ -89,7 +110,8 @@ def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, 
     if is_junk_item(title):
         return None
 
-    if not is_allowed_brand(title):
+    # Strict brand verification
+    if not is_valid_brand_product(title):
         return None
 
     if mrp_price and mrp_price > deal_price:
@@ -157,7 +179,6 @@ def parse_flipkart(html):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # Comprehensive container selectors across Flipkart grid & list templates
     cards = soup.select("div[data-id], div._1sdMkc, div.slAVV4, div._1AtVbE")
 
     for card in cards:
@@ -175,7 +196,6 @@ def parse_flipkart(html):
         base_url = f"https://www.flipkart.com{clean_path}"
         deal_url = f"{base_url}?affid={FLIPKART_AFFID}" if FLIPKART_AFFID else base_url
 
-        # Check title attributes across multiple Flipkart layouts
         img_el = card.select_one("img[src*='rukminim']") or card.select_one("img")
         image_url = img_el.get("src") if img_el else None
 
@@ -187,14 +207,12 @@ def parse_flipkart(html):
                 if title:
                     break
 
-        # Fall back to image alt tag if text node is obfuscated
         if not title and img_el:
             title = img_el.get("alt", "").strip()
 
         if not title:
             continue
 
-        # Extract prices via regex to stay immune to obfuscated CSS class hashes
         card_text = card.get_text(separator=" ")
         extracted = [clean_price(p) for p in re.findall(r"₹\s*([0-9,]+)", card_text)]
         extracted = [p for p in extracted if p and p > 100]
@@ -252,7 +270,6 @@ def send_telegram(deal):
         except Exception as e:
             print(f"[WARNING] Image upload failed: {e}")
 
-    # Fallback to Text
     res = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         data={"chat_id": CHAT_ID, "text": caption, "parse_mode": "HTML"},
@@ -295,7 +312,6 @@ def main():
 
         time.sleep(2)
 
-    # Sort glitches first, then highest discount percentage
     deals_to_post.sort(key=lambda x: (x["is_glitch"], x["discount"]), reverse=True)
 
     posted_count = 0
