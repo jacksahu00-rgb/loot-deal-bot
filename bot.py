@@ -31,13 +31,11 @@ JUNK_KEYWORDS = [
 
 ALLOWED_PREFIXES = ["all-new", "new", "newly", "the", "latest", "truly", "wireless", "original", "genuine"]
 
-# Top primary-source channels to monitor via open web bridge
 UPSTREAM_TELEGRAM_CHANNELS = [
     "https://t.me/s/Desidime",
     "https://t.me/s/Dealsmagnet"
 ]
 
-# Rotating store search feeds
 ALL_FEEDS = [
     {"store": "Amazon", "url": "https://www.amazon.in/s?k=oneplus+buds&s=popularity-rank"},
     {"store": "Amazon", "url": "https://www.amazon.in/s?k=jbl+earbuds&s=popularity-rank"},
@@ -113,25 +111,21 @@ def get_title_signature(title):
     return " ".join(words)
 
 
-# --- UPSTREAM TELEGRAM CHANNEL ENGINE ---
-
 def unwrap_deal_url(url):
-    """Resolves shorteners (amzn.to, fkrt.co, bit.ly) and injects your affiliate tag."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    final_url = url
     try:
-        resp = requests.head(url, allow_redirects=True, timeout=6, headers=headers)
+        resp = requests.get(url, allow_redirects=True, timeout=8, headers=headers, stream=True)
         final_url = resp.url
     except Exception:
         final_url = url
 
-    # Amazon Link
     if "amazon.in" in final_url:
         asin_match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", final_url)
         if asin_match:
             asin = asin_match.group(1)
             return f"https://www.amazon.in/dp/{asin}?tag={AMAZON_TAG}", "Amazon", f"amz_{asin}"
 
-    # Flipkart Link
     elif "flipkart.com" in final_url:
         pid_match = re.search(r"pid=([A-Z0-9]+)", final_url)
         clean_path = final_url.split("?")[0]
@@ -144,11 +138,11 @@ def unwrap_deal_url(url):
 
 
 def parse_telegram_upstream():
-    """Scrapes DesiDime & DealsMagnet public streams for real-time loots."""
     discovered = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     for channel_url in UPSTREAM_TELEGRAM_CHANNELS:
+        channel_name = channel_url.split("/")[-1]
         try:
             res = requests.get(channel_url, headers=headers, timeout=15)
             if res.status_code != 200:
@@ -156,28 +150,25 @@ def parse_telegram_upstream():
             soup = BeautifulSoup(res.text, "html.parser")
             messages = soup.select("div.tgme_widget_message_wrap")
 
-            # Check last 10 messages from each channel
-            for msg in messages[-10:]:
+            checked_slice = messages[-30:] if len(messages) >= 30 else messages
+            for msg in checked_slice:
                 text_el = msg.select_one("div.tgme_widget_message_text")
                 if not text_el:
                     continue
                 raw_text = text_el.get_text(separator=" ")
                 text_lower = raw_text.lower()
 
-                # 1. Filter out junk and competitor brands
                 if any(junk in text_lower for junk in JUNK_KEYWORDS):
                     continue
                 if any(re.search(r"\b" + re.escape(b) + r"\b", text_lower) for b in BLOCKED_BRANDS):
                     continue
 
-                # 2. Check if it's one of your target brands OR a price glitch
                 has_brand = any(re.search(r"\b" + re.escape(brand) + r"\b", text_lower) for brand in ALLOWED_BRANDS)
                 is_glitch = bool(re.search(r"\b(glitch|price error|price bug|loot drop|flat ₹1|loot at ₹|90% off|85% off)\b", text_lower))
 
                 if not (has_brand or is_glitch):
                     continue
 
-                # 3. Extract deal link
                 raw_links = [a["href"] for a in text_el.find_all("a", href=True)]
                 if not raw_links:
                     raw_links = re.findall(r"(https?://[^\s]+)", raw_text)
@@ -191,7 +182,6 @@ def parse_telegram_upstream():
                 if not clean_url:
                     continue
 
-                # 4. Extract photo if present
                 photo_el = msg.select_one("a.tgme_widget_message_photo_wrap")
                 image_url = None
                 if photo_el and photo_el.get("style"):
@@ -199,7 +189,6 @@ def parse_telegram_upstream():
                     if img_match:
                         image_url = img_match.group(1)
 
-                # Clean caption
                 headline = raw_text.split("\n")[0][:90]
                 headline = re.sub(r"@[A-Za-z0-9_]+", "", headline).strip()
 
@@ -217,12 +206,10 @@ def parse_telegram_upstream():
                     "source": "upstream"
                 })
         except Exception as e:
-            print(f"[WARNING] Upstream scan error: {e}")
+            print(f"[WARNING] Upstream scan error on {channel_name}: {e}")
 
     return discovered
 
-
-# --- DIRECT SEARCH ENGINE ---
 
 def extract_deal_info(title, deal_price, mrp_price, image_url, deal_url, unique_id, store):
     if not title or len(title) < 15 or not deal_price or deal_price < 299:
@@ -359,7 +346,7 @@ def send_telegram(deal):
             caption += f"💰 <b>Deal Price:</b> ₹{int(deal['deal_price']):,}\n"
         caption += f"🛒 <b>Buy Now:</b>\n{deal['deal_url']}"
 
-    caption += f"\n\n📢 <b>Join:</b> @jacklootdeals"
+    caption += "\n\n📢 <b>Join:</b> @jacklootdeals"
 
     if deal.get("image_url"):
         try:
@@ -438,7 +425,6 @@ def main():
             if sig in current_run_signatures:
                 continue
 
-            # Severe Price Bug
             is_extreme_glitch = discount >= 80 or (mrp and mrp >= 3000 and current_price <= 499)
             if is_extreme_glitch:
                 item["is_glitch"] = True
@@ -447,7 +433,6 @@ def main():
                 history[uid] = {"base_price": current_price}
                 continue
 
-            # Price Drop Check
             if uid in history and history[uid].get("base_price"):
                 base_price = history[uid]["base_price"]
                 price_drop = base_price - current_price
@@ -462,14 +447,12 @@ def main():
                 elif current_price < base_price:
                     history[uid]["base_price"] = current_price
 
-            # Record baseline
             if uid not in history:
                 history[uid] = {"base_price": current_price}
                 print(f"[BASELINE] Saved {item['title'][:35]} at ₹{int(current_price)}")
 
         time.sleep(2)
 
-    # Dispatch alerts
     posted_count = 0
     for deal in alerts_to_send:
         if posted_count >= MAX_DEALS_PER_RUN:
@@ -478,7 +461,6 @@ def main():
             posted_count += 1
             time.sleep(3)
 
-    # Trim tracking history to last 500 items
     if len(history) > 500:
         keys_to_keep = list(history.keys())[-500:]
         history = {k: history[k] for k in keys_to_keep}
