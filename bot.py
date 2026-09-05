@@ -29,10 +29,10 @@ JUNK_KEYWORDS = [
     "pouch", "skin", "cleaning kit", "cable protector", "stand holder", "silicone"
 ]
 
-# Words that legitimately precede a brand name in official titles
 ALLOWED_PREFIXES = ["all-new", "new", "newly", "the", "latest"]
 
-BRAND_MIN_DISCOUNT = 15
+# Minimum percentage discount from MRP to qualify as an instant flash loot
+INSTANT_LOOT_DISCOUNT = 50
 MAX_DEALS_PER_RUN = 3
 
 FEEDS = [
@@ -47,6 +47,10 @@ FEEDS = [
     {
         "store": "Flipkart",
         "url": "https://www.flipkart.com/search?q=oneplus+buds&sort=popularity"
+    },
+    {
+        "store": "Flipkart",
+        "url": "https://www.flipkart.com/search?q=realme+buds&sort=popularity"
     }
 ]
 
@@ -73,7 +77,6 @@ def fetch_page(url, retries=2):
             print(f"[WARNING] Fetch error on attempt {attempt}/{retries}: {err}")
         time.sleep(3)
 
-    print(f"[ERROR] Failed to fetch feed after {retries} attempts: {url}")
     return None
 
 
@@ -90,11 +93,9 @@ def clean_price(text):
 def is_genuine_brand_product(title):
     title_lower = title.lower()
 
-    # Reject third-party accessories pretending compatibility
     if any(clone in title_lower for clone in CLONE_KEYWORDS):
         return False
 
-    # Reject known competitor budget/clone brands
     for blocked in BLOCKED_BRANDS:
         if re.search(r"\b" + re.escape(blocked) + r"\b", title_lower):
             return False
@@ -103,14 +104,12 @@ def is_genuine_brand_product(title):
     if not tokens:
         return False
 
-    # Strip allowed promotional prefixes like "All-New" or "New"
     while tokens and tokens[0] in ALLOWED_PREFIXES:
         tokens.pop(0)
 
     if not tokens:
         return False
 
-    # STRICT RULE: The leading word MUST be the authentic brand itself
     return tokens[0] in ALLOWED_BRANDS
 
 
@@ -125,19 +124,14 @@ def get_title_signature(title):
     return " ".join(words)
 
 
-def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, store):
-    # Reject banners or stub headlines (must be a full title)
+def extract_deal_info(title, deal_price, mrp_price, image_url, deal_url, unique_id, store):
     if not title or len(title) < 15:
         return None
 
     if not deal_price or deal_price < 299:
         return None
 
-    if is_junk_item(title):
-        return None
-
-    # Enforce strict first-word brand authenticity
-    if not is_genuine_brand_product(title):
+    if is_junk_item(title) or not is_genuine_brand_product(title):
         return None
 
     if mrp_price and mrp_price > deal_price:
@@ -146,26 +140,20 @@ def evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, 
         discount = 0
 
     short_title = title[:82] + "..." if len(title) > 85 else title
-    is_glitch = discount >= 55 or (mrp_price and mrp_price >= 3000 and deal_price <= 799)
-    is_brand_deal = discount >= BRAND_MIN_DISCOUNT
 
-    if is_glitch or is_brand_deal:
-        return {
-            "id": unique_id,
-            "signature": get_title_signature(title),
-            "store": store,
-            "title": short_title,
-            "deal_price": deal_price,
-            "mrp_price": mrp_price,
-            "discount": discount,
-            "image_url": image_url,
-            "deal_url": deal_url,
-            "is_glitch": is_glitch
-        }
-    return None
+    return {
+        "id": unique_id,
+        "signature": get_title_signature(title),
+        "store": store,
+        "title": short_title,
+        "deal_price": deal_price,
+        "mrp_price": mrp_price,
+        "discount": discount,
+        "image_url": image_url,
+        "deal_url": deal_url
+    }
 
 
-# --- AMAZON PARSER ---
 def parse_amazon(html):
     soup = BeautifulSoup(html, "html.parser")
     items = soup.select('div[data-component-type="s-search-result"]')
@@ -193,14 +181,13 @@ def parse_amazon(html):
         deal_url = f"https://www.amazon.in/dp/{asin}?th=1&tag={AMAZON_TAG}"
         unique_id = f"amz_{asin}"
 
-        deal = evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, "Amazon")
+        deal = extract_deal_info(title, deal_price, mrp_price, image_url, deal_url, unique_id, "Amazon")
         if deal:
             results.append(deal)
 
     return results
 
 
-# --- FLIPKART PARSER ---
 def parse_flipkart(html):
     soup = BeautifulSoup(html, "html.parser")
     results = []
@@ -254,7 +241,7 @@ def parse_flipkart(html):
 
         unique_id = f"fk_{pid}"
 
-        deal = evaluate_deal(title, deal_price, mrp_price, image_url, deal_url, unique_id, "Flipkart")
+        deal = extract_deal_info(title, deal_price, mrp_price, image_url, deal_url, unique_id, "Flipkart")
         if deal:
             results.append(deal)
 
@@ -264,23 +251,31 @@ def parse_flipkart(html):
 def send_telegram(deal):
     store_badge = "🛒 <b>Flipkart</b>" if deal["store"] == "Flipkart" else "📦 <b>Amazon</b>"
 
-    if deal["is_glitch"]:
+    if deal.get("is_price_drop"):
+        caption = f"📉 <b>[PRICE DROP ALERT!]</b> 📉\n"
+        caption += f"{store_badge} | <b>Dropped ₹{int(deal['drop_amount']):,}!</b>\n\n"
+        caption += f"⚡ <b>{deal['title']}</b>\n\n"
+        caption += f"💰 <b>Dropped Price:</b> ₹{int(deal['deal_price']):,}\n"
+        caption += f"🏷️ <b>Previous Deal Price:</b> <s>₹{int(deal['previous_price']):,}</s>\n"
+        if deal["mrp_price"]:
+            caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n"
+        caption += "\n🔥 <i>Price just fell below normal! Grab fast!</i>\n\n"
+        caption += f"🛒 <b>Order Now:</b>\n{deal['deal_url']}"
+    elif deal.get("is_glitch"):
         caption = f"🚨 <b>[PRICE GLITCH / LOOT DROP]</b> 🚨\n"
         caption += f"{store_badge} | <b>{deal['discount']}% OFF</b>\n\n"
         caption += f"⚡ <b>{deal['title']}</b>\n\n"
         caption += f"💰 <b>Glitch Price:</b> ₹{int(deal['deal_price']):,}\n"
         if deal["mrp_price"]:
             caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n"
-        caption += "\n⚠️ <i>Price can expire any minute! Order fast!</i>\n\n"
+        caption += "\n⚠️ <i>Price can revert any minute! Grab fast!</i>\n\n"
         caption += f"🔗 <b>Buy Deal:</b>\n{deal['deal_url']}"
     else:
-        caption = f"{store_badge} | 🔥 <b>{deal['discount']}% OFF</b>\n\n"
+        caption = f"{store_badge} | 🔥 <b>{deal['discount']}% OFF LOOT</b>\n\n"
         caption += f"<b>{deal['title']}</b>\n\n"
-        caption += f"💰 <b>Deal Price:</b> ₹{int(deal['deal_price']):,}\n"
+        caption += f"💰 <b>Loot Price:</b> ₹{int(deal['deal_price']):,}\n"
         if deal["mrp_price"]:
             caption += f"❌ <b>MRP:</b> ₹{int(deal['mrp_price']):,}\n\n"
-        else:
-            caption += "\n"
         caption += f"🛒 <b>Buy Now:</b>\n{deal['deal_url']}"
 
     if deal["image_url"]:
@@ -291,7 +286,7 @@ def send_telegram(deal):
                 timeout=25,
             )
             if res.json().get("ok"):
-                print(f"[SUCCESS] Posted {deal['store']} deal: {deal['title']}")
+                print(f"[SUCCESS] Alert sent: {deal['title']}")
                 return True
         except Exception as e:
             print(f"[WARNING] Image upload failed: {e}")
@@ -302,7 +297,7 @@ def send_telegram(deal):
         timeout=25,
     )
     if res.json().get("ok"):
-        print(f"[SUCCESS] Posted {deal['store']} text: {deal['title']}")
+        print(f"[SUCCESS] Text alert sent: {deal['title']}")
         return True
 
     return False
@@ -310,57 +305,101 @@ def send_telegram(deal):
 
 def main():
     history_file = "posted_deals.json"
-    posted_ids = set()
+    history = {}
 
     if os.path.exists(history_file):
         try:
             with open(history_file, "r") as f:
-                posted_ids = set(json.load(f))
+                raw_data = json.load(f)
+                if isinstance(raw_data, dict):
+                    history = raw_data
+                elif isinstance(raw_data, list):
+                    # Migrate old list format to price-history dictionary
+                    history = {item_id: {"base_price": None} for item_id in raw_data}
         except Exception:
-            posted_ids = set()
+            history = {}
 
-    deals_to_post = []
-    current_run_signatures = set()
+    discovered_items = []
 
     for feed in FEEDS:
-        print(f"[INFO] Scanning {feed['store']} feed: {feed['url'][:45]}...")
+        print(f"[INFO] Scanning {feed['store']} feed...")
         html = fetch_page(feed["url"])
         if not html:
             continue
 
         deals = parse_amazon(html) if feed["store"] == "Amazon" else parse_flipkart(html)
-        print(f"[INFO] Found {len(deals)} genuine brand items from {feed['store']}.")
-
-        for d in deals:
-            if d["id"] not in posted_ids and d["signature"] not in current_run_signatures:
-                deals_to_post.append(d)
-                current_run_signatures.add(d["signature"])
-
+        print(f"[INFO] Discovered {len(deals)} brand items on {feed['store']}.")
+        discovered_items.extend(deals)
         time.sleep(2)
 
-    deals_to_post.sort(key=lambda x: (x["is_glitch"], x["discount"]), reverse=True)
+    alerts_to_send = []
+    current_run_signatures = set()
+
+    for item in discovered_items:
+        uid = item["id"]
+        current_price = item["deal_price"]
+        mrp = item["mrp_price"]
+        discount = item["discount"]
+        sig = item["signature"]
+
+        if sig in current_run_signatures:
+            continue
+
+        # Case 1: Extreme Price Glitch (always trigger immediately)
+        is_glitch = discount >= 65 or (mrp and mrp >= 3000 and current_price <= 799)
+        if is_glitch:
+            item["is_glitch"] = True
+            alerts_to_send.append(item)
+            current_run_signatures.add(sig)
+            history[uid] = {"base_price": current_price}
+            continue
+
+        # Case 2: Product already known -> Check for a real price drop
+        if uid in history and history[uid].get("base_price"):
+            base_price = history[uid]["base_price"]
+            # Trigger if price dropped by at least ₹200 or 5% below previous price
+            if current_price < base_price and (base_price - current_price >= 200 or (base_price - current_price) / base_price >= 0.05):
+                item["is_price_drop"] = True
+                item["previous_price"] = base_price
+                item["drop_amount"] = base_price - current_price
+                alerts_to_send.append(item)
+                current_run_signatures.add(sig)
+                history[uid]["base_price"] = current_price
+                continue
+            elif current_price < base_price:
+                # Minor reduction; update lowest without triggering alert
+                history[uid]["base_price"] = current_price
+
+        # Case 3: First time seeing this product
+        if uid not in history:
+            # If it's already an extreme deal (>= 50% off MRP), post as Loot
+            if discount >= INSTANT_LOOT_DISCOUNT:
+                item["is_price_drop"] = False
+                item["is_glitch"] = False
+                alerts_to_send.append(item)
+                current_run_signatures.add(sig)
+                history[uid] = {"base_price": current_price}
+            else:
+                # Normal everyday price (e.g. ₹8,499) -> Save baseline, do NOT post yet
+                history[uid] = {"base_price": current_price}
+                print(f"[BASELINE] Saved {item['title'][:40]} at ₹{int(current_price)} (waiting for drop)")
+
+    # Sort alerts: glitches first, then highest price drops
+    alerts_to_send.sort(key=lambda x: (x.get("is_glitch", False), x.get("drop_amount", 0)), reverse=True)
 
     posted_count = 0
-    newly_posted = []
-
-    for deal in deals_to_post:
+    for deal in alerts_to_send:
         if posted_count >= MAX_DEALS_PER_RUN:
             break
 
-        sent = send_telegram(deal)
-        if sent:
-            posted_ids.add(deal["id"])
-            newly_posted.append(deal["id"])
+        if send_telegram(deal):
             posted_count += 1
             time.sleep(3)
 
-    if newly_posted:
-        trimmed = list(posted_ids)[-500:]
-        with open(history_file, "w") as f:
-            json.dump(trimmed, f, indent=2)
-        print(f"[INFO] Posted {posted_count} verified brand deals. History updated.")
-    else:
-        print("[INFO] No new verified brand deals met criteria this run.")
+    # Save updated baselines
+    with open(history_file, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"[INFO] Run complete. {posted_count} price drop/glitch alerts sent. Baselines updated.")
 
 
 if __name__ == "__main__":
