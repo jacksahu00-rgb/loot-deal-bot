@@ -82,5 +82,44 @@
   },
   "amz_B0GQTNXDYM": {
     "base_price": 4099.0
+  },
+  "fk_ACCHM8PHXX6NSDWK": {
+    "base_price": 3199.0
+  },
+  "fk_ACCHAFSFGWTXYPGD": {
+    "base_price": 1699.0
+  },
+  "fk_ACCHM8PHHGVBA2NA": {
+    "base_price": 3199.0
+  },
+  "fk_ACCHJ2G6TE7HDNRM": {
+    "base_price": 3999.0
+  },
+  "fk_ACCH2PGXZJNXZVS8": {
+    "base_price": 2399.0
+  },
+  "fk_ACCHNKHFHRAAGVCH": {
+    "base_price": 6999.0
+  },
+  "fk_ACCG65YC8DTGDCNN": {
+    "base_price": 1499.0
+  },
+  "fk_ACCG65YCGHHHZPNZ": {
+    "base_price": 1299.0
+  },
+  "fk_ACCH6SR89YFVYNHW": {
+    "base_price": 1999.0
+  },
+  "fk_ACCH9M7NKXZHDKVN": {
+    "base_price": 1599.0
+  },
+  "fk_ACCFKYE2ARGG67WC": {
+    "base_price": 599.0
+  },
+  "fk_ACCHBPM5D8CCHDYB": {
+    "base_price": 300.0
+  },
+  "fk_ACCH6SR8NYS7A3ZR": {
+    "base_price": 1999.0
   }
 }
