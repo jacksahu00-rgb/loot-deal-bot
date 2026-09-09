@@ -154,5 +154,8 @@
   },
   "fk_ACCGS7MBKQZC3RAT": {
     "base_price": 3999.0
+  },
+  "amz_B0GMJ4S7RY": {
+    "base_price": 20910.0
   }
 }
