@@ -196,5 +196,8 @@
   },
   "fk_MONHGWESQPHPNMHZ": {
     "base_price": null
+  },
+  "fk_TVSHPCXWC8Y9UYSU": {
+    "base_price": null
   }
 }
