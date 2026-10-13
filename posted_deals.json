@@ -138,7 +138,7 @@
     "base_price": 1699.0
   },
   "amz_B0FCMPJQ1J": {
-    "base_price": 6499.0
+    "base_price": 5999.0
   },
   "fk_ACCHZ3ACGTWVGBYG": {
     "base_price": 2899.0
@@ -447,7 +447,7 @@
     "base_price": 3799.0
   },
   "amz_B0F5GV3Y87": {
-    "base_price": 3049.0
+    "base_price": 2988.0
   },
   "fk_ACCH7HSAVSKZW4PA": {
     "base_price": 10999.0
@@ -523,5 +523,11 @@
   },
   "amz_B0DZCPM1NW": {
     "base_price": 1499.0
+  },
+  "amz_B0F8BGP4DQ": {
+    "base_price": 5499.0
+  },
+  "fk_ACCGQRC2ANF7E2RY": {
+    "base_price": 1799.0
   }
 }
