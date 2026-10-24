@@ -619,5 +619,14 @@
   },
   "fk_MOBHQDMKYG8JCE4R": {
     "base_price": null
+  },
+  "fk_ACCHSDWT3JEJ47YT": {
+    "base_price": 998.0
+  },
+  "fk_ACCHSDWGPVJG73NK": {
+    "base_price": 998.0
+  },
+  "fk_ACCHSDVMJ9ZGEKRF": {
+    "base_price": 1314.0
   }
 }
