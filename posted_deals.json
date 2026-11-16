@@ -781,5 +781,8 @@
   },
   "fk_ACCGWMFSP82HG75K": {
     "base_price": 25900.0
+  },
+  "amz_B0H28LBC3W": {
+    "base_price": 4999.0
   }
 }
